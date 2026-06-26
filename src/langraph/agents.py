@@ -9,7 +9,6 @@ from .state import SMEState
 def create_agent_node(llm: BaseChatModel, system_prompt: str) -> Callable[[SMEState], Dict[str, Any]]:
 
     def node(state: SMEState) -> Dict[str, Any]:
-        # Serialize snapshots using model_dump (Pydantic v2) or dict (Pydantic v1)
         def to_dict(obj: Any) -> Any:
             if hasattr(obj, "model_dump"):
                 return obj.model_dump()
@@ -48,8 +47,7 @@ def create_agent_node(llm: BaseChatModel, system_prompt: str) -> Callable[[SMESt
 
     return node
 
-
-# --- High-Quality System Prompts ---
+# System Prompts
 
 CRM_AGENT_PROMPT = """You are the CRM (Customer Relationship Management) Agent.
 Your core responsibilities are:

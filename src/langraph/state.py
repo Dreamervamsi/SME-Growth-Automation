@@ -53,7 +53,6 @@ class ActiveCampaign(BaseModel):
 
 # appending campaigns
 def append_campaigns(left: Optional[List[ActiveCampaign]], right: Optional[List[ActiveCampaign]]) -> List[ActiveCampaign]:
-    """Reducer to append active campaigns sequentially."""
     if left is None:
         left = []
     if right is None:
