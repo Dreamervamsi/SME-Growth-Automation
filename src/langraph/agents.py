@@ -2,10 +2,12 @@ import json
 from typing import Any, Callable, Dict, List
 from langchain_core.messages import SystemMessage
 from langchain_core.language_models import BaseChatModel
+from langchain_groq import ChatGroq
 
 from .state import SMEState
 
 def create_agent_node(llm: BaseChatModel, system_prompt: str) -> Callable[[SMEState], Dict[str, Any]]:
+
     def node(state: SMEState) -> Dict[str, Any]:
         # Serialize snapshots using model_dump (Pydantic v2) or dict (Pydantic v1)
         def to_dict(obj: Any) -> Any:
@@ -84,3 +86,20 @@ Your core responsibilities are:
 
 You have access to the current system state snapshot, which contains existing campaign details under 'active_campaigns' (in full state context) and reference client/lead info.
 Generate highly engaging, relevant, and personalized copy that aligns with the target segment and channel constraints."""
+
+
+# --- Node Instantiations ---
+
+import os
+
+# Using llama-3.1-70b-versatile as the default chat model instance.
+# We fall back to a dummy API key if not set in the environment to prevent import errors.
+api_key = os.getenv("GROQ_API_KEY", "dummy_key_to_allow_import")
+llm = ChatGroq(model="llama-3.1-70b-versatile", api_key=api_key)
+
+crm_node = create_agent_node(llm, CRM_AGENT_PROMPT)
+stock_node = create_agent_node(llm, STOCK_AGENT_PROMPT)
+leads_node = create_agent_node(llm, LEADS_AGENT_PROMPT)
+marketing_node = create_agent_node(llm, MARKETING_AGENT_PROMPT)
+
+
