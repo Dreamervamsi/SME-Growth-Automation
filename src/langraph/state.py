@@ -60,7 +60,7 @@ def append_campaigns(left: Optional[List[ActiveCampaign]], right: Optional[List[
     return left + right
 
 
-class SMEState(Dict[str, Any]):    
+class SMEState(Dict[str, Any]):
     # chat history 
     messages: Annotated[list, add_messages]
     
