@@ -99,5 +99,3 @@ crm_node = create_agent_node(llm, CRM_AGENT_PROMPT)
 stock_node = create_agent_node(llm, STOCK_AGENT_PROMPT)
 leads_node = create_agent_node(llm, LEADS_AGENT_PROMPT)
 marketing_node = create_agent_node(llm, MARKETING_AGENT_PROMPT)
-
-
