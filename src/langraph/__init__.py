@@ -13,6 +13,18 @@ from .agents import (
     leads_node,
     marketing_node,
 )
+from .database import (
+    get_db_connection,
+    init_db,
+    get_inventory_levels,
+    update_stock,
+    get_customers,
+    get_customer_segments,
+    get_leads,
+    get_campaigns,
+    add_campaign,
+    seed_db,
+)
 
 __all__ = [
     "Langraph",
@@ -31,6 +43,17 @@ __all__ = [
     "stock_node",
     "leads_node",
     "marketing_node",
+    "get_db_connection",
+    "init_db",
+    "get_inventory_levels",
+    "update_stock",
+    "get_customers",
+    "get_customer_segments",
+    "get_leads",
+    "get_campaigns",
+    "add_campaign",
+    "seed_db",
 ]
+
 
 
