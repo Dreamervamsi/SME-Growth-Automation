@@ -74,3 +74,5 @@ class SMEState(Dict[str, Any]):
     active_campaigns: Annotated[List[ActiveCampaign], append_campaigns]
     # next agents
     next_agents: List[str]
+    # routing reasoning
+    routing_reasoning: str
