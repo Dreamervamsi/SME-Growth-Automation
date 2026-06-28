@@ -7,6 +7,7 @@ import os
 import sys
 import uuid
 import json
+import tempfile
 
 from dotenv import load_dotenv
 
@@ -41,6 +42,11 @@ from src.langraph.state import (
     InventoryItem,
     TrackedLead,
     ActiveCampaign,
+)
+from tools import (
+    import_inventory_from_excel,
+    export_reorder_list_to_csv,
+    send_whatsapp_or_telegram_notification,
 )
 
 # ---------------------------------------------------------------------------
@@ -336,10 +342,71 @@ def extract_campaign_from_message(content: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Graph runner
+# Graph runner — live token streaming
 # ---------------------------------------------------------------------------
-def run_graph(graph, user_message: str):
-    """Stream graph execution, logging each node. Returns (final_reply, interrupted)."""
+STREAM_AGENT_LABELS = {
+    "orchestrator": "🧠 Orchestrator",
+    "crm_agent": "👥 CRM Agent",
+    "stock_agent": "📦 Stock Agent",
+    "leads_agent": "🎯 Leads Agent",
+    "marketing_agent": "📣 Marketing Agent",
+    "final": "✅ Final Summary",
+}
+
+
+def _render_streaming_markdown(container, label: str, text: str, *, cursor: bool = True) -> None:
+    if container is None:
+        return
+    suffix = "▌" if cursor and text else ""
+    if label:
+        container.markdown(f"**{label}**\n\n{text}{suffix}")
+    elif text or cursor:
+        container.markdown(f"{text}{suffix}")
+    else:
+        container.markdown("_Waiting for response…_")
+
+
+def _process_graph_updates(payload: dict, seen_nodes: set, last_ai_content: str) -> str:
+    """Apply node update events for trace logging and capture latest AI text."""
+    routing_reasoning = ""
+    next_agents: list = []
+
+    for _node_name, node_update in payload.items():
+        if not isinstance(node_update, dict):
+            continue
+        routing_reasoning = node_update.get("routing_reasoning", routing_reasoning) or routing_reasoning
+        next_agents = node_update.get("next_agents", next_agents) or next_agents
+
+        for msg in node_update.get("messages", []):
+            if isinstance(msg, AIMessage) and msg.content and msg.content != last_ai_content:
+                last_ai_content = msg.content
+                is_responder_msg = (
+                    "FINAL_RESPONSE" in (next_agents or [])
+                    or "responder" in seen_nodes
+                )
+                if not is_responder_msg:
+                    for candidate in ["crm_agent", "stock_agent", "leads_agent", "marketing_agent"]:
+                        if candidate not in seen_nodes:
+                            add_trace(candidate)
+                            seen_nodes.add(candidate)
+                            break
+                else:
+                    seen_nodes.add("responder")
+
+    if routing_reasoning and routing_reasoning not in [
+        t["reasoning"] for t in st.session_state.execution_trace
+    ]:
+        add_trace("orchestrator", routing_reasoning)
+
+    if next_agents and "FINAL_RESPONSE" in next_agents and "responder" not in seen_nodes:
+        add_trace("responder")
+        seen_nodes.add("responder")
+
+    return last_ai_content
+
+
+def run_graph(graph, user_message: str, live_status=None, live_response=None):
+    """Stream graph execution with live token updates. Returns (final_reply, interrupted)."""
     inventory, customers, leads, campaigns = load_db_state()
 
     initial_state = {
@@ -350,63 +417,90 @@ def run_graph(graph, user_message: str):
         "active_campaigns":     campaigns,
         "next_agents":          [],
         "routing_reasoning":    "",
-        "final_reply_to_user": "",   # Required by new Final Responder schema
-        "agents_completed":    [],   # Tracks which specialist agents have run
+        "final_reply_to_user": "",
+        "agents_completed":     [],
     }
     config = {"configurable": {"thread_id": st.session_state.thread_id}, "recursion_limit": 12}
 
-    last_ai_content   = ""
-    final_reply       = ""    # Populated by the responder node
-    seen_nodes        = set()
+    last_ai_content = ""
+    final_text = ""
+    current_source = ""
+    current_text = ""
+    seen_nodes: set = set()
+
+    if live_status:
+        live_status.markdown("⚡ **Starting multi-agent workflow…**")
 
     try:
-        for event in graph.stream(initial_state, config=config, stream_mode="values"):
-            routing_reasoning  = event.get("routing_reasoning", "")
-            next_agents        = event.get("next_agents", [])
-            messages           = event.get("messages", [])
-            # Read the orchestrator's synthesized reply (set when next_step=FINAL_RESPONSE)
-            event_final_reply  = event.get("final_reply_to_user", "")
+        for mode, payload in graph.stream(
+            initial_state,
+            config=config,
+            stream_mode=["custom", "updates"],
+        ):
+            if mode == "custom" and isinstance(payload, dict):
+                kind = payload.get("kind")
 
-            if event_final_reply:
-                final_reply = event_final_reply
+                if kind == "agent_status":
+                    agent = payload.get("agent", "")
+                    label = payload.get("label") or STREAM_AGENT_LABELS.get(agent, agent)
+                    if payload.get("status") == "started" and live_status:
+                        live_status.markdown(f"⚡ **{label}**…")
 
-            # Log orchestrator when it sets routing
-            if routing_reasoning and routing_reasoning not in [
-                t["reasoning"] for t in st.session_state.execution_trace
-            ]:
-                add_trace("orchestrator", routing_reasoning)
+                elif kind == "routing":
+                    reasoning = payload.get("reasoning", "")
+                    next_step = payload.get("next_step", "")
+                    if reasoning and reasoning not in [
+                        t["reasoning"] for t in st.session_state.execution_trace
+                    ]:
+                        add_trace("orchestrator", reasoning)
+                    if live_status:
+                        if next_step == "FINAL_RESPONSE":
+                            live_status.markdown("⚡ **Composing final summary**…")
+                        else:
+                            target = STREAM_AGENT_LABELS.get(next_step, next_step)
+                            live_status.markdown(f"⚡ Routing → **{target}**…")
+                    current_source = ""
+                    current_text = ""
 
-            # Log specialist agents and capture responder output
-            for msg in messages:
-                if isinstance(msg, AIMessage) and msg.content and msg.content != last_ai_content:
-                    last_ai_content = msg.content
-                    # The last message produced is the responder's final reply
-                    # Attribute trace to the correct specialist (not responder)
-                    is_responder_msg = (
-                        "FINAL_RESPONSE" in (next_agents or [])
-                        or "responder" in seen_nodes
-                    )
-                    if not is_responder_msg:
-                        for candidate in ["crm_agent", "stock_agent", "leads_agent", "marketing_agent"]:
-                            if candidate not in seen_nodes:
-                                add_trace(candidate)
-                                seen_nodes.add(candidate)
-                                break
+                elif kind == "token":
+                    source = payload.get("source", "final")
+                    token = payload.get("content", "")
+                    if not token:
+                        continue
+                    if source == "final":
+                        final_text += token
+                        _render_streaming_markdown(
+                            live_response,
+                            STREAM_AGENT_LABELS["final"],
+                            final_text,
+                        )
                     else:
-                        seen_nodes.add("responder")
+                        if source != current_source:
+                            current_source = source
+                            current_text = ""
+                        current_text += token
+                        _render_streaming_markdown(
+                            live_response,
+                            STREAM_AGENT_LABELS.get(source, source),
+                            current_text,
+                        )
 
-            # Detect when FINAL_RESPONSE is chosen and log the responder trace
-            if next_agents and "FINAL_RESPONSE" in next_agents and "responder" not in seen_nodes:
-                add_trace("responder")
-                seen_nodes.add("responder")
+            elif mode == "updates" and isinstance(payload, dict):
+                last_ai_content = _process_graph_updates(payload, seen_nodes, last_ai_content)
 
-        # Check if graph is paused at an interrupt
+        if live_status:
+            live_status.markdown("✅ **Complete**")
+        if live_response and final_text:
+            _render_streaming_markdown(
+                live_response,
+                STREAM_AGENT_LABELS["final"],
+                final_text,
+                cursor=False,
+            )
+
         state = graph.get_state(config)
         interrupted = bool(state.next)
-
-        # The responder node's AIMessage IS the final reply; fall back to
-        # the orchestrator-written field if message history didn't update yet
-        best_reply = final_reply or last_ai_content
+        best_reply = final_text or last_ai_content
         return best_reply, interrupted
 
     except Exception as exc:
@@ -414,22 +508,79 @@ def run_graph(graph, user_message: str):
         return "", False
 
 
-def resume_graph(graph) -> str:
-    """Resume the graph after HITL approval."""
-    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+def resume_graph(graph, live_status=None, live_response=None) -> str:
+    """Resume the graph after HITL approval with live streaming."""
+    config = {"configurable": {"thread_id": st.session_state.thread_id}, "recursion_limit": 12}
     last_content = ""
+    final_text = ""
+    current_source = ""
+    current_text = ""
+    seen_nodes: set = set()
+
+    if live_status:
+        live_status.markdown("⚡ **Resuming workflow…**")
+
     try:
-        for event in graph.stream(None, config=config, stream_mode="values"):
-            next_agents = event.get("next_agents", [])
-            messages    = event.get("messages", [])
-            if "FINISH" in (next_agents or []):
-                add_trace("FINISH", "All requested tasks completed successfully.")
-            for msg in messages:
-                if isinstance(msg, AIMessage) and msg.content:
-                    last_content = msg.content
+        for mode, payload in graph.stream(
+            None,
+            config=config,
+            stream_mode=["custom", "updates"],
+        ):
+            if mode == "custom" and isinstance(payload, dict):
+                kind = payload.get("kind")
+                if kind == "agent_status":
+                    label = payload.get("label") or STREAM_AGENT_LABELS.get(
+                        payload.get("agent", ""), payload.get("agent", "")
+                    )
+                    if payload.get("status") == "started" and live_status:
+                        live_status.markdown(f"⚡ **{label}**…")
+                elif kind == "token":
+                    source = payload.get("source", "final")
+                    token = payload.get("content", "")
+                    if source == "final":
+                        final_text += token
+                        _render_streaming_markdown(
+                            live_response,
+                            STREAM_AGENT_LABELS["final"],
+                            final_text,
+                        )
+                    else:
+                        if source != current_source:
+                            current_source = source
+                            current_text = ""
+                        current_text += token
+                        _render_streaming_markdown(
+                            live_response,
+                            STREAM_AGENT_LABELS.get(source, source),
+                            current_text,
+                        )
+                elif kind == "routing":
+                    if payload.get("next_step") == "FINAL_RESPONSE" and live_status:
+                        live_status.markdown("⚡ **Composing final summary**…")
+
+            elif mode == "updates" and isinstance(payload, dict):
+                for _node_name, node_update in payload.items():
+                    if not isinstance(node_update, dict):
+                        continue
+                    next_agents = node_update.get("next_agents", [])
+                    if "FINISH" in (next_agents or []):
+                        add_trace("FINISH", "All requested tasks completed successfully.")
+                    for msg in node_update.get("messages", []):
+                        if isinstance(msg, AIMessage) and msg.content:
+                            last_content = msg.content
+                last_content = _process_graph_updates(payload, seen_nodes, last_content)
+
+        if live_response and final_text:
+            _render_streaming_markdown(
+                live_response,
+                STREAM_AGENT_LABELS["final"],
+                final_text,
+                cursor=False,
+            )
     except Exception as exc:
         st.error(f"⚠️ Resume error: {exc}")
-    return last_content
+
+    return final_text or last_content
 
 
 # ---------------------------------------------------------------------------
@@ -463,6 +614,69 @@ def render_sidebar():
                     st.session_state[k] = [] if k in ("messages", "execution_trace") else False if isinstance(st.session_state.get(k), bool) else None
                 st.session_state.thread_id = str(uuid.uuid4())
                 st.rerun()
+
+        with st.expander("🛠️ Business Tools", expanded=False):
+            uploaded = st.file_uploader(
+                "Import inventory (CSV / Excel)",
+                type=["csv", "xlsx", "xls"],
+                key="inventory_upload",
+            )
+            if uploaded is not None:
+                if st.button("📥 Import to Database", use_container_width=True, key="import_inv_btn"):
+                    suffix = os.path.splitext(uploaded.name)[1]
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(uploaded.getvalue())
+                        tmp_path = tmp.name
+                    try:
+                        result = import_inventory_from_excel(tmp_path, db_path=DB_PATH)
+                        if result["status"] == "success":
+                            st.success(result["message"])
+                        else:
+                            st.error(result["message"])
+                    finally:
+                        os.unlink(tmp_path)
+
+            low_stock = [
+                r for r in get_inventory_levels(DB_PATH)
+                if r["stock_quantity"] < r["reorder_point"]
+            ]
+            if low_stock:
+                export_path = os.path.join(ROOT_DIR, "reorder_list.csv")
+                if st.button("📤 Export Reorder List (CSV)", use_container_width=True, key="export_reorder_btn"):
+                    result = export_reorder_list_to_csv(low_stock, export_path)
+                    if result["status"] == "success":
+                        with open(export_path, "rb") as f:
+                            st.download_button(
+                                "⬇️ Download reorder_list.csv",
+                                data=f,
+                                file_name="reorder_list.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                            )
+                    else:
+                        st.error(result["message"])
+            else:
+                st.caption("No low-stock items to export.")
+
+            st.text_input("Telegram Chat ID", key="telegram_chat_id", placeholder="e.g. 123456789")
+            notify_msg = st.text_area(
+                "Notification message",
+                key="telegram_msg",
+                placeholder="Low stock alert: 2 SKUs need reordering.",
+                height=80,
+            )
+            if st.button("📲 Send Telegram Alert", use_container_width=True, key="telegram_notify_btn"):
+                chat_id = st.session_state.get("telegram_chat_id", "").strip()
+                if not chat_id:
+                    st.warning("Enter a Telegram chat ID first.")
+                elif not notify_msg.strip():
+                    st.warning("Enter a message to send.")
+                else:
+                    result = send_whatsapp_or_telegram_notification(chat_id, notify_msg.strip())
+                    if result["status"] == "success":
+                        st.success(result["message"])
+                    else:
+                        st.error(result["message"])
 
         st.divider()
 
@@ -719,8 +933,10 @@ def _handle_approval(graph, approved: bool):
         )
 
     # Resume graph
-    with st.spinner("⚡ Resuming multi-agent workflow…"):
-        final_content = resume_graph(graph)
+    with st.chat_message("assistant", avatar="🤖"):
+        status_slot = st.empty()
+        response_slot = st.empty()
+        final_content = resume_graph(graph, live_status=status_slot, live_response=response_slot)
 
     if final_content and approved:
         add_assistant_message(
@@ -753,8 +969,14 @@ def handle_user_input(graph, user_input: str):
         st.markdown(user_input)
 
     with st.chat_message("assistant", avatar="🤖"):
-        with st.spinner("🧠 Multi-agent system is processing your request…"):
-            ai_content, interrupted = run_graph(graph, user_input)
+        status_slot = st.empty()
+        response_slot = st.empty()
+        ai_content, interrupted = run_graph(
+            graph,
+            user_input,
+            live_status=status_slot,
+            live_response=response_slot,
+        )
 
         if interrupted and ai_content:
             # Marketing agent paused → HITL
