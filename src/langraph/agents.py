@@ -4,7 +4,6 @@ from langchain_core.messages import SystemMessage, AIMessage
 from langchain_core.language_models import BaseChatModel
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
-
 from .state import SMEState
 
 def create_agent_node(llm: BaseChatModel, system_prompt: str) -> Callable[[SMEState], Dict[str, Any]]:
@@ -20,11 +19,13 @@ def create_agent_node(llm: BaseChatModel, system_prompt: str) -> Callable[[SMESt
         customer_profiles = [to_dict(p) for p in state.get("customer_profiles", [])]
         current_inventory = [to_dict(i) for i in state.get("current_inventory", [])]
         tracked_leads = [to_dict(l) for l in state.get("tracked_leads", [])]
+        active_campaigns = [to_dict(c) for c in state.get("active_campaigns", [])]
 
         state_snapshot = {
             "customer_profiles": customer_profiles,
             "current_inventory": current_inventory,
-            "tracked_leads": tracked_leads
+            "tracked_leads": tracked_leads,
+            "active_campaigns": active_campaigns,
         }
 
         # Build context prompt including the system prompt and the current state snapshot
@@ -91,10 +92,10 @@ Generate highly engaging, relevant, and personalized copy that aligns with the t
 
 import os
 
-# Using llama-3.1-70b-versatile as the default chat model instance.
-# We fall back to a dummy API key if not set in the environment to prevent import errors.
+# Fall back to a placeholder key at import time so the module loads without .env;
+# set GROQ_API_KEY in the environment before invoking the LLM.
 api_key = os.getenv("GROQ_API_KEY", "dummy_key_to_allow_import")
-llm = ChatGroq(model="qwen/qwen3.6-27b", api_key=api_key)
+llm = ChatGroq(model="llama-3.1-8b-instant", api_key=api_key)
 
 crm_node = create_agent_node(llm, CRM_AGENT_PROMPT)
 stock_node = create_agent_node(llm, STOCK_AGENT_PROMPT)
