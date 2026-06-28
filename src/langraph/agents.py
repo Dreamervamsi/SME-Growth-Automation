@@ -1,6 +1,6 @@
 import json
 from typing import Any, Callable, Dict, List
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, AIMessage
 from langchain_core.language_models import BaseChatModel
 from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
@@ -105,13 +105,17 @@ marketing_node = create_agent_node(llm, MARKETING_AGENT_PROMPT)
 # --- Orchestrator / Supervisor Routing ---
 
 class RouterOutput(BaseModel):
-    next_agents: List[str] = Field(
+    next_step: str = Field(
         ...,
-        description="A list of next agent node names to route to. Allowed values: 'crm_agent', 'stock_agent', 'leads_agent', 'marketing_agent', or 'FINISH'."
+        description="The next step in the workflow. Allowed values: 'crm_agent', 'stock_agent', 'leads_agent', 'marketing_agent', or 'FINAL_RESPONSE'."
     )
     reasoning: str = Field(
         ...,
         description="A short explanation of why this routing decision was made based on the request and current business state."
+    )
+    final_reply_to_user: str = Field(
+        default="",
+        description="A friendly, clear conversational summary for the business owner explaining what was done, key findings, and recommended next steps. Populate ONLY when next_step is 'FINAL_RESPONSE'."
     )
 
 
@@ -129,8 +133,9 @@ Routing Guidelines:
   - If inventory is low or unsold for a long time, route to 'stock_agent' first to identify the specific items, then route to 'marketing_agent' or 'crm_agent' to design promotions for those items or update profiles.
   - If a lead needs scoring and then outreach copy, route to 'leads_agent' first, then 'marketing_agent'.
 - Once a specialist agent completes its task, it will hand back control to you. Re-evaluate the updated state to decide the next step.
-- When all requested operations are fully completed, route to 'FINISH'.
-- Always return a JSON object with 'next_agents' and 'reasoning' fields.
+- When all requested operations are fully completed, route to 'FINAL_RESPONSE'.
+- In the final step (when next_step is 'FINAL_RESPONSE'), you MUST read the specialists' changes/data in the state snapshot and write a comprehensive, professional, and friendly response to the business owner explaining what was done, key findings, and recommended next steps in the 'final_reply_to_user' field. Do not leave 'final_reply_to_user' blank.
+- Always return a JSON object with 'next_step', 'reasoning', and 'final_reply_to_user' fields.
 """
 
 
@@ -171,19 +176,34 @@ def orchestrator_node(state: SMEState) -> Dict[str, Any]:
     response = structured_llm.invoke(messages)
 
     if isinstance(response, dict):
-        next_agents = response.get("next_agents", [])
+        next_step = response.get("next_step", "FINAL_RESPONSE")
         reasoning = response.get("reasoning", "")
+        final_reply_to_user = response.get("final_reply_to_user", "")
     else:
-        next_agents = response.next_agents
-        reasoning = response.reasoning
+        next_step = getattr(response, "next_step", "FINAL_RESPONSE")
+        reasoning = getattr(response, "reasoning", "")
+        final_reply_to_user = getattr(response, "final_reply_to_user", "")
 
-    # Validate next_agents values
-    valid_agents = {"crm_agent", "stock_agent", "leads_agent", "marketing_agent", "FINISH"}
-    cleaned_agents = [agent for agent in next_agents if agent in valid_agents]
-    if not cleaned_agents:
-        cleaned_agents = ["FINISH"]
+    # Validate next_step values
+    valid_agents = {"crm_agent", "stock_agent", "leads_agent", "marketing_agent", "FINAL_RESPONSE"}
+    if next_step not in valid_agents:
+        next_step = "FINAL_RESPONSE"
 
     return {
-        "next_agents": cleaned_agents,
-        "routing_reasoning": reasoning
+        "next_agents": [next_step],
+        "routing_reasoning": reasoning,
+        "final_reply_to_user": final_reply_to_user
+    }
+
+
+def responder_node(state: SMEState) -> Dict[str, Any]:
+    """
+    Final Responder Node: Appends the final summary constructed by the orchestrator
+    to the state message history.
+    """
+    final_reply = state.get("final_reply_to_user", "")
+    if not final_reply:
+        final_reply = "Workflow completed successfully."
+    return {
+        "messages": [AIMessage(content=final_reply)]
     }
