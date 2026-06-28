@@ -55,6 +55,8 @@ AGENT_LABELS = {
     "leads_agent":     ("🎯", "Leads Agent",      "#10B981"),
     "marketing_agent": ("📣", "Marketing Agent",  "#EC4899"),
     "FINISH":          ("✅", "Workflow Complete", "#6EE7B7"),
+    "FINAL_RESPONSE":  ("✅", "Workflow Complete", "#6EE7B7"),
+    "responder":       ("🤖", "Final Responder",   "#8B5CF6"),
 }
 
 # ---------------------------------------------------------------------------
@@ -269,7 +271,7 @@ def ensure_database():
 # LangGraph app with MemorySaver + interrupt_after marketing_agent
 # ---------------------------------------------------------------------------
 @st.cache_resource
-def build_graph():
+def build_graph_v2():
     memory = MemorySaver()
     return workflow.compile(
         checkpointer=memory,
@@ -337,56 +339,75 @@ def extract_campaign_from_message(content: str) -> dict:
 # Graph runner
 # ---------------------------------------------------------------------------
 def run_graph(graph, user_message: str):
-    """Stream graph execution, logging each node. Returns (last_ai_content, interrupted)."""
+    """Stream graph execution, logging each node. Returns (final_reply, interrupted)."""
     inventory, customers, leads, campaigns = load_db_state()
 
     initial_state = {
-        "messages":          [HumanMessage(content=user_message)],
-        "customer_profiles": customers,
-        "current_inventory": inventory,
-        "tracked_leads":     leads,
-        "active_campaigns":  campaigns,
-        "next_agents":       [],
-        "routing_reasoning": "",
+        "messages":             [HumanMessage(content=user_message)],
+        "customer_profiles":    customers,
+        "current_inventory":    inventory,
+        "tracked_leads":        leads,
+        "active_campaigns":     campaigns,
+        "next_agents":          [],
+        "routing_reasoning":    "",
+        "final_reply_to_user": "",   # Required by new Final Responder schema
+        "agents_completed":    [],   # Tracks which specialist agents have run
     }
-    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+    config = {"configurable": {"thread_id": st.session_state.thread_id}, "recursion_limit": 12}
 
-    last_ai_content  = ""
-    seen_nodes       = set()
+    last_ai_content   = ""
+    final_reply       = ""    # Populated by the responder node
+    seen_nodes        = set()
 
     try:
         for event in graph.stream(initial_state, config=config, stream_mode="values"):
-            routing_reasoning = event.get("routing_reasoning", "")
-            next_agents       = event.get("next_agents", [])
-            messages          = event.get("messages", [])
+            routing_reasoning  = event.get("routing_reasoning", "")
+            next_agents        = event.get("next_agents", [])
+            messages           = event.get("messages", [])
+            # Read the orchestrator's synthesized reply (set when next_step=FINAL_RESPONSE)
+            event_final_reply  = event.get("final_reply_to_user", "")
+
+            if event_final_reply:
+                final_reply = event_final_reply
 
             # Log orchestrator when it sets routing
-            if routing_reasoning and "orchestrator" not in seen_nodes:
-                add_trace("orchestrator", routing_reasoning)
-                seen_nodes.add("orchestrator_first")
-
-            # Log orchestrator subsequent calls
             if routing_reasoning and routing_reasoning not in [
                 t["reasoning"] for t in st.session_state.execution_trace
             ]:
                 add_trace("orchestrator", routing_reasoning)
 
-            # Log specialist agents by detecting new AI messages
+            # Log specialist agents and capture responder output
             for msg in messages:
                 if isinstance(msg, AIMessage) and msg.content and msg.content != last_ai_content:
                     last_ai_content = msg.content
-                    # Guess which specialist produced it based on trace order
-                    for candidate in ["crm_agent", "stock_agent", "leads_agent", "marketing_agent"]:
-                        if candidate not in seen_nodes:
-                            add_trace(candidate)
-                            seen_nodes.add(candidate)
-                            break
+                    # The last message produced is the responder's final reply
+                    # Attribute trace to the correct specialist (not responder)
+                    is_responder_msg = (
+                        "FINAL_RESPONSE" in (next_agents or [])
+                        or "responder" in seen_nodes
+                    )
+                    if not is_responder_msg:
+                        for candidate in ["crm_agent", "stock_agent", "leads_agent", "marketing_agent"]:
+                            if candidate not in seen_nodes:
+                                add_trace(candidate)
+                                seen_nodes.add(candidate)
+                                break
+                    else:
+                        seen_nodes.add("responder")
+
+            # Detect when FINAL_RESPONSE is chosen and log the responder trace
+            if next_agents and "FINAL_RESPONSE" in next_agents and "responder" not in seen_nodes:
+                add_trace("responder")
+                seen_nodes.add("responder")
 
         # Check if graph is paused at an interrupt
         state = graph.get_state(config)
         interrupted = bool(state.next)
 
-        return last_ai_content, interrupted
+        # The responder node's AIMessage IS the final reply; fall back to
+        # the orchestrator-written field if message history didn't update yet
+        best_reply = final_reply or last_ai_content
+        return best_reply, interrupted
 
     except Exception as exc:
         st.error(f"⚠️ Graph execution error: {exc}")
@@ -751,7 +772,7 @@ def handle_user_input(graph, user_input: str):
             add_assistant_message(response_text)
 
         elif ai_content:
-            add_trace("FINISH", "All tasks completed.")
+            add_trace("FINAL_RESPONSE", "Response delivered.")
             st.markdown(ai_content)
             add_assistant_message(ai_content)
         else:
@@ -773,7 +794,7 @@ def main():
     st.session_state.db_status = db_result
 
     # Build LangGraph app
-    graph = build_graph()
+    graph = build_graph_v2()
 
     # ── Header ───────────────────────────────────────────────────────────
     st.markdown("""
