@@ -19,18 +19,20 @@ from src.langraph.agents import llm
 def test_router_output_schema():
     # Verify that RouterOutput validates inputs correctly
     valid_data = {
-        "next_agents": ["crm_agent", "marketing_agent"],
-        "reasoning": "Need to follow up with VIPs and draft email template."
+        "next_step": "crm_agent",
+        "reasoning": "Need to follow up with VIPs and draft email template.",
+        "final_reply_to_user": "Here is your summary."
     }
     router_out = RouterOutput(**valid_data)
-    assert router_out.next_agents == ["crm_agent", "marketing_agent"]
+    assert router_out.next_step == "crm_agent"
     assert router_out.reasoning == "Need to follow up with VIPs and draft email template."
+    assert router_out.final_reply_to_user == "Here is your summary."
 
 
 def test_orchestrator_node(monkeypatch):
     # Mock output from structured LLM
     expected_output = RouterOutput(
-        next_agents=["stock_agent"],
+        next_step="stock_agent",
         reasoning="Low stock levels detected. Checking inventory first."
     )
 
@@ -59,7 +61,8 @@ def test_orchestrator_node(monkeypatch):
         "tracked_leads": [],
         "active_campaigns": [],
         "next_agents": [],
-        "routing_reasoning": ""
+        "routing_reasoning": "",
+        "final_reply_to_user": ""
     }
 
     # Execute orchestrator_node
@@ -77,11 +80,11 @@ def test_compiled_graph_execution(monkeypatch):
     # Mock the with_structured_output for orchestrator
     # First call: route to stock_agent
     # Second call: route to marketing_agent
-    # Third call: route to FINISH
+    # Third call: route to FINAL_RESPONSE
     orchestrator_outputs = [
-        RouterOutput(next_agents=["stock_agent"], reasoning="Check stock levels."),
-        RouterOutput(next_agents=["marketing_agent"], reasoning="Draft promotion for stock."),
-        RouterOutput(next_agents=["FINISH"], reasoning="All tasks complete.")
+        RouterOutput(next_step="stock_agent", reasoning="Check stock levels."),
+        RouterOutput(next_step="marketing_agent", reasoning="Draft promotion for stock."),
+        RouterOutput(next_step="FINAL_RESPONSE", reasoning="All tasks complete.", final_reply_to_user="Workflow finished successfully.")
     ]
 
     class MockStructuredRunnable:
@@ -122,7 +125,8 @@ def test_compiled_graph_execution(monkeypatch):
         "tracked_leads": [],
         "active_campaigns": [],
         "next_agents": [],
-        "routing_reasoning": ""
+        "routing_reasoning": "",
+        "final_reply_to_user": ""
     }
 
     # Run the compiled graph
@@ -134,9 +138,10 @@ def test_compiled_graph_execution(monkeypatch):
     # 2. Stock agent runs, routes back to Orchestrator
     # 3. Orchestrator runs, decides marketing_agent
     # 4. Marketing agent runs, routes back to Orchestrator
-    # 5. Orchestrator runs, decides FINISH
-    # 6. Graph terminates
+    # 5. Orchestrator runs, decides FINAL_RESPONSE
+    # 6. Responder runs, graph terminates
     assert call_sequence == ["orchestrator", "stock", "orchestrator", "marketing", "orchestrator"]
-    assert final_state["next_agents"] == ["FINISH"]
+    assert final_state["next_agents"] == ["FINAL_RESPONSE"]
     assert final_state["routing_reasoning"] == "All tasks complete."
-    assert len(final_state["messages"]) >= 3 # original human message + 2 AI messages from agents
+    assert len(final_state["messages"]) >= 4 # original human message + 2 AI messages from agents + 1 from responder
+    assert final_state["messages"][-1].content == "Workflow finished successfully."
