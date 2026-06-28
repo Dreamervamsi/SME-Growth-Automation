@@ -94,7 +94,7 @@ import os
 # Using llama-3.1-70b-versatile as the default chat model instance.
 # We fall back to a dummy API key if not set in the environment to prevent import errors.
 api_key = os.getenv("GROQ_API_KEY", "dummy_key_to_allow_import")
-llm = ChatGroq(model="llama-3.1-70b-versatile", api_key=api_key)
+llm = ChatGroq(model="qwen/qwen3.6-27b", api_key=api_key)
 
 crm_node = create_agent_node(llm, CRM_AGENT_PROMPT)
 stock_node = create_agent_node(llm, STOCK_AGENT_PROMPT)
@@ -135,13 +135,13 @@ Routing Guidelines:
 - Once a specialist agent completes its task, it will hand back control to you. Re-evaluate the updated state to decide the next step.
 - When all requested operations are fully completed, route to 'FINAL_RESPONSE'.
 - In the final step (when next_step is 'FINAL_RESPONSE'), you MUST read the specialists' changes/data in the state snapshot and write a comprehensive, professional, and friendly response to the business owner explaining what was done, key findings, and recommended next steps in the 'final_reply_to_user' field. Do not leave 'final_reply_to_user' blank.
-- Always return a JSON object with 'next_step', 'reasoning', and 'final_reply_to_user' fields.
+- Always return a valid JSON object matching the requested schema fields: 'next_step', 'reasoning', and 'final_reply_to_user'.
 """
 
 
 def orchestrator_node(state: SMEState) -> Dict[str, Any]:
-    # Use with_structured_output to force structured routing
-    structured_llm = llm.with_structured_output(RouterOutput)
+    # Force structured output via JSON mode for Groq compatibility
+    structured_llm = llm.with_structured_output(RouterOutput, method="json_mode")
 
     def to_dict(obj: Any) -> Any:
         if hasattr(obj, "model_dump"):
@@ -169,8 +169,12 @@ def orchestrator_node(state: SMEState) -> Dict[str, Any]:
         "-----------------------------\n"
     )
 
-    # Compile messages list
-    messages = [SystemMessage(content=full_system_content)] + state.get("messages", [])
+    # 🛑 FIX: Filter out intermediate specialist assistant responses.
+    # This prevents the JSON parser from choking and stops the model from looping.
+    human_messages = [msg for msg in state.get("messages", []) if msg.type == "human"]
+    
+    # Construct clean payload: System instructions + User Query only
+    messages = [SystemMessage(content=full_system_content)] + human_messages
 
     # Invoke Structured LLM
     response = structured_llm.invoke(messages)
@@ -194,7 +198,6 @@ def orchestrator_node(state: SMEState) -> Dict[str, Any]:
         "routing_reasoning": reasoning,
         "final_reply_to_user": final_reply_to_user
     }
-
 
 def responder_node(state: SMEState) -> Dict[str, Any]:
     """
