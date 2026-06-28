@@ -94,28 +94,29 @@ def test_compiled_graph_execution(monkeypatch):
 
     monkeypatch.setattr(ChatGroq, "with_structured_output", lambda self, schema, **kwargs: MockStructuredRunnable())
 
-    # Mock specialists invokes
-    # We monkeypatch the invoke of the ChatGroq class
-    def mock_llm_invoke(self, messages, *args, **kwargs):
-        # Determine which agent was called by looking at the system message content
+    def mock_llm_stream(self, messages, *args, **kwargs):
         system_msg = messages[0].content
+        if "Final Responder" in system_msg:
+            call_sequence.append("responder")
+            yield AIMessage(content="Workflow finished successfully.")
+            return
         if "CRM" in system_msg:
             call_sequence.append("crm")
-            return AIMessage(content="CRM completed.")
+            yield AIMessage(content="CRM completed.")
         elif "Stock" in system_msg:
             call_sequence.append("stock")
-            return AIMessage(content="Stock completed.")
+            yield AIMessage(content="Stock completed.")
         elif "Leads" in system_msg:
             call_sequence.append("leads")
-            return AIMessage(content="Leads completed.")
+            yield AIMessage(content="Leads completed.")
         elif "Marketing" in system_msg:
             call_sequence.append("marketing")
-            return AIMessage(content="Marketing completed.")
+            yield AIMessage(content="Marketing completed.")
         else:
             call_sequence.append("unknown")
-            return AIMessage(content="Unknown completed.")
+            yield AIMessage(content="Unknown completed.")
 
-    monkeypatch.setattr(ChatGroq, "invoke", mock_llm_invoke)
+    monkeypatch.setattr(ChatGroq, "stream", mock_llm_stream)
 
     # Initialize graph state
     initial_state = {
@@ -140,7 +141,7 @@ def test_compiled_graph_execution(monkeypatch):
     # 4. Marketing agent runs, routes back to Orchestrator
     # 5. Orchestrator runs, decides FINAL_RESPONSE
     # 6. Responder runs, graph terminates
-    assert call_sequence == ["orchestrator", "stock", "orchestrator", "marketing", "orchestrator"]
+    assert call_sequence == ["orchestrator", "stock", "orchestrator", "marketing", "orchestrator", "responder"]
     assert final_state["next_agents"] == ["FINAL_RESPONSE"]
     assert final_state["routing_reasoning"] == "All tasks complete."
     assert len(final_state["messages"]) >= 4 # original human message + 2 AI messages from agents + 1 from responder

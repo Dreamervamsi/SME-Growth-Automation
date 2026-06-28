@@ -43,7 +43,7 @@ def test_create_agent_node_execution():
     llm = MockChatModel(responses=["CRM response content"])
 
     # Create the agent node function
-    crm_node = create_agent_node(llm, CRM_AGENT_PROMPT)
+    crm_node = create_agent_node(llm, CRM_AGENT_PROMPT, "crm_agent")
 
     # Prepare input state
     state: SMEState = {
